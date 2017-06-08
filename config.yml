@@ -1,0 +1,17 @@
+---
+
+## Global Settings
+DATA:
+  DIR: "/opt/svn-to-github/data"
+  ARCHIVE: "$DATA_DIR/archive"
+GITHUB: "github.com"
+  API: "https://$GITHUB"
+#  API: "https://$GITHUB/api/v3" #Enterprise Only
+BFG:
+  DOWNLOAD: "http://repo1.maven.org/maven2/com/madgag/bfg/1.12.15/bfg-1.12.15.jar"
+  LIMIT: "50"
+LFS:
+  DOWNLOAD: "https://packagecloud.io/github/git-lfs/packages/el/7/git-lfs-2.1.1-1.el7.x86_64.rpm/download"
+  LIMIT: "50"
+DEFAULT:
+  DOMAIN: "yourdomain.com"

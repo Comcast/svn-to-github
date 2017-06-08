@@ -1,0 +1,5 @@
+%packager Dustin_Morgan
+%_topdir      %(echo $HOME)/rpmbuild
+%_tmppath %(echo $HOME)/rpmbuild/tmp
+%_smp_mflags  -j3
+%__arch_install_post   /usr/lib/rpm/check-rpaths   /usr/lib/rpm/check-buildroot

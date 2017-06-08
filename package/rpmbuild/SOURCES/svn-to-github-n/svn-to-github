@@ -1,0 +1,1971 @@
+#!/usr/bin/env bash
+#
+#    Name: SVN2GitHub
+#  Author: Dustin Morgan <dustin_morgan@comcast.com>
+#    Date: May 12, 2017
+# Purpose: Ease the conversion of SVN to Git and use git submodules for
+#          non-standard svn layouts with nested projects
+#
+#shellcheck svn-to-github --exclude=SC2143,SC2155,SC2001,SC2162,SC2002,SC2013,SC2116,SC2005,SC2003,SC2035,SC2010,SC2164,SC2054,SC2140,SC2034,SC2068,SC2145,SC2062,SC2063,SC2012,SC2128,SC2188,SC2129,SC2126
+
+#ARGS
+while test $# -gt 0; do
+  case "$1" in
+    -h|--help)
+              echo "Run this with answer flags for [required] options to bypass interactive mode when converting an svn repo to a github repo."
+              echo ""
+              echo "options:"
+              echo "-h, --help"
+              echo "--ghuser=swizzley                                           [required]: the ghuser used to login to github"
+              echo "--token=d938a09236f449c5ea9f6bcfbcb64bacda55e620            [required]: the github user authorization token, setup here: https://github.com/settings/tokens"
+              echo "--svn-url=https://svn.yourdomain.net/my_repo                [required]: to specify the source svn repo"
+              echo "--svn-user=username                                         [optional]: to specify the source svn repo username"
+              echo "--svn-pass=password                                         [optional]: to specify the source svn repo password, if special characters are used quote password in single-quotes"
+              echo "--org=aps                                                   [required option A]: the github organization to create the repo(s) in"
+              echo "--no-org                                                    [required option B]: don't create repos under an org, but rather under a user instead, caveat is repo(s) cannot already exist in user's primary Organization"
+              echo "--no-branches                                               [optional]: do not convert branches, ignore all branches"
+              echo "--no-tags                                                   [optional]: do not convert tags, ignore all tags"
+              echo "--no-tag-branches                                           [optional]: do not allow tags to be branches, convert tags to releases only"
+              echo "--no-preserve-trunk                                         [optional]: do not keep the trunk directory, so trunk becomes the root of master"
+              echo "--no-other-repos                                            [optional]: do not create submodule repos, only create the primary repo but nest them if they already exist"
+              echo "--new-name=repo_name                                        [required or optional]: rename your new repo name in github, required if name already exists in github under user or organization, whichever is specified by option A or B above"
+              echo "--lfs-limit=50                                              [default=50, max=50]: specify the large-file-size limit, --lfs-limit=2 ~ 2 Megabytes, maximum in github is 50, default is 50, 2-5 is optimal"
+              echo "--blob-limit=50                                             [default=50, max=50]: specify the max size of blobs allowed, --blob-limit=50 ~ 50 Megabytes, maximum in github.com is 50M, default is 50, < 50 is optimal"
+              echo "--authors=/path/to/authors_file                             [optional]: to import an authors file rather than generate one, may not provide correct email address for users who do not conform to first_last@yourdomain.com"
+              echo "--ignore=/path/to/ignore_file                               [optional]: to import the gitignore file rather than convert it from the existing svn ignore attributes" #TODO
+              echo "--work-dir=/path/to/store/files                             [optional]: to specify a working directory for creating files"
+              echo "--branches=label1,label2 or --branches=custom_label         [optional]: a csv list of alternative branch dir names or specify just one"
+              echo "--trunk=label1,label2 or --trunk=custom_label               [optional]: a csv list of alternative trunk dir names or specify just one"
+              echo "--tags=label1,label2 or --tags=custom_label                 [optional]: a csv list of alternative tag dir names or specify just one"
+              echo "--svn-prefix=svn-                                           [optional]: specify a prefix given to an otherwise standard-layout of svn directories, '--svn-prefix=svn-' == '--branch=svn-branches --trunk=svn-trunk --tags=svn-tags'"
+              echo "--private                                                   [optional]: make all repo(s) private in github"
+              echo "--check-size                                                [optional]: estimate the size on disk needed for conversion of non-standard-layouts, can be very time consuming"
+              echo "--safe                                                      [optional]: be prompted before all github repository creations or deletions when combined with --undo"
+              echo "--install                                                   [optional]: dependency check & installation, Warning: Will Fail if dependencies are not met. Deps: git-svn, java-7, git-lfs, bfg-repo-cleaner ver. >= 1.12.5 "
+              echo "--force                                                     [warning!]: force the creation, will delete all data from previous run and possibly create duplicate submodule repos with suffixes in github, it will NOT allow bypassing of --new-name for the primary repo"
+              echo "--undo                                                      [warning!]: delete the github repos from a previous run, but preserve all log data"
+              exit
+              ;;
+    --authors*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export AUTHORS_FILE=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              export IMPORT_AUTHORS=false
+              shift
+              ;;
+    --svn-url*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export SVN_REPO=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --org*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export ORG=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --ghuser*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export NTID=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --token*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export TOKEN=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --new-name*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export RENAME=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --ignore*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export IGNORE_FILE=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              export IMPORT_IGNORE=false
+              shift
+              ;;
+    --work-dir*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export DATA_DIR=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --force*)
+              export FORCE=true
+              shift
+              ;;
+    --undo*)
+              export UNDO=true
+              shift
+              ;;
+    --branches*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export ALT_BRANCH=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --tags*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export ALT_TAGS=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --trunk*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export ALT_TRUNK=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --svn-prefix*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export PREFIX=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --svn-user*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export SVN_USER=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --svn-pass*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export SVN_PASS=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --no-branches*)
+              export BRANCHES=false
+              shift
+              ;;
+    --no-tags*)
+              export TAGS=false
+              shift
+              ;;
+    --no-preserve-trunk*)
+              export PRESERVE_TRUNK=false
+              shift
+              ;;
+    --no-tag-branches*)
+              export TAG_BRANCH=false
+              shift
+              ;;
+    --check-size*)
+              export CHECK_SIZE=true
+              shift
+              ;;
+    --private*)
+              export PRIVATE='true'
+              shift
+              ;;
+    --install*)
+              export INSTALL=true
+              shift
+              ;;
+    --no-org*)
+              export NOORG=true
+              shift
+              ;;
+    --lfs-limit*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export LFS=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --blob-limit*)
+              if [ ! "$(echo "$1"|grep =)" ]; then echo "--options must be in the form of --option="; exit 1; fi
+              export BLOB_LIMIT=$(echo "$1" | sed -e 's/^[^=]*=//g')
+              shift
+              ;;
+    --safe*)
+              export SAFE=true
+              shift
+              ;;
+    --no-other-repos*)
+              export DRYRUN=true
+              shift
+              ;;
+    *)
+              echo "Invalid Argument"
+              exit 1
+              ;;
+  esac
+done
+
+#RUN BEGINS HERE
+main ()
+{
+  eval $(config /etc/svn-to-github/config.yml)
+  set_vars
+
+  if [ -z "$ORG" ] || [ -z "$NTID" ] || [ -z "$TOKEN" ]; then
+    interactive
+    if ! $NOORG ; then
+      echo "Checking github organization permissions..." | tee -a "$STATUS"
+      gh_test_org
+    fi
+    if ! $UNDO ; then
+      echo "Checking for name conflict in github for \"$REPO_NAME\"" | tee -a "$STATUS"
+      gh_test_repo
+    fi
+  else
+    export AUTH="-u $NTID:$TOKEN"
+    if ! $NOORG ; then
+      echo "Checking github organization permissions..." | tee -a "$STATUS"
+      gh_test_org
+    fi
+    if ! $UNDO ; then
+      echo "Checking for name conflict in github for \"$REPO_NAME\"" | tee -a "$STATUS"
+      gh_test_repo
+    fi
+  fi
+
+  if $UNDO && [ "$SAFE" == false ] ; then
+    echo "Deleting all repos from github that were created from a previos run..." | tee -a "$STATUS"
+    undo
+    report
+  elif [ "$UNDO" == true ] && [ "$FORCE" == true ] && [ "$SAFE" == true ]; then
+    echo "Force initiated! Removing all traces of previos run and starting over" | tee -a "$STATUS"
+    mkdir -p "$TMP_DIR"
+    checkout
+    create_submodules
+    create_primary
+    create_repos
+    undo
+    report
+    echo "SUCCESS: Conversion complete" | tee -a "$STATUS"
+    exit 0
+  else
+    echo "NOTICE: Getting started..." | tee -a "$STATUS"
+    clean_logs | tee -a "$STATUS"
+
+    if $INSTALL ; then
+      if [ "$USER" == 'root' ]; then
+        echo "Checking prerequisites..." | tee -a "$STATUS"
+        install
+      elif [ "$(touch "$WORK_DIR"/.lock && test -f "$WORK_DIR"/.lock)" ] && [ "$(yum list installed|grep git-svn &> /dev/null)" ] && [ "$(git lfs &> /dev/null)" ] && [ "$(which java &> /dev/null)" ]; then
+        echo "WARNING: Not running as root, but things look safe to proceed." | tee -a "$STATUS"
+      else
+        echo "FAILURE: Authentication failed." >> "$STATUS"
+        fail
+      fi
+    else
+      if [ "$(touch "$WORK_DIR"/.lock && test -f "$WORK_DIR"/.lock)" ] && [ "$(which git svn)" ]; then
+        echo "WARNING: Install was skipped, but things look safe to proceed." | tee -a "$STATUS"
+      else
+        echo "WARNING: Something went wrong, either permission denied on \"$WORK_DIR\" or the package \"git-svn\" is not installed or is missing from \$PATH." >> "$STATUS"
+        fail
+      fi
+    fi
+
+    if $FORCE ; then
+      echo "Force initiated! Removing all traces of previos run..." | tee -a "$STATUS"
+      rm -rf "$AUTHORPROG" "$BFGPROG" "$TMP_DIR" "$SVN_DIR"
+    fi
+
+    if $CHECK_SIZE ; then
+      echo "Checking size, this could take a while..." | tee -a "$STATUS"
+      check_size | tee -a "$STATUS"
+    fi
+
+    if [ ! -d "$SVN_DIR/.svn" ]; then
+      echo "Checking out \"$SVN_REPO\" locally, this could take a while... see \"$COLOG\" for details." | tee -a "$STATUS"
+      if [ -n "$SVN_USER" ] && [ -n "$SVN_PASS" ]; then
+        save_svn_credentials &>> "$STATUS"
+      fi
+      checkout
+    else
+      echo "WARNING: \"$SVN_DIR\" already exists, if this is not a complete and up-to-date revision this whole process will result in erroneous conversion." | tee -a "$STATUS"
+      echo "Checking for submodules..."
+      export MODULES=$(find "$SVN_DIR" -mindepth 1 -type d -regextype posix-extended -regex "^.*/$TRUNK"|grep -Ev "/$TAG/"|grep -Ev "/$BRANCH/"|rev|cut -d / -f 2-|rev|sort -u)
+    fi
+
+    if [ ! -f "$AUTHORS_FILE" ]; then
+      echo "Getting list of authors..." | tee -a "$STATUS"
+      authors | tee -a "$STATUS"
+    fi
+
+    if [ ! -f "$IGNORE_FILE" ]; then
+      echo "Gathering svn ignore properties..." | tee -a "$STATUS"
+      ignore | tee -a "$STATUS"
+    fi
+
+    if [ ! -d "$TMP_DIR" ]; then
+      mkdir "$TMP_DIR"
+      git config --global user.name "SVN Converter" &>> "$CNVLOG"
+      git config --global user.email svn_converter@devnull.com &>> "$CNVLOG"
+    fi
+
+    if $DRYRUN ; then
+      echo "NOTICE: --no-other-repos enabled, no submodules will be created..."
+      create_submodules | tee -a "$STATUS"
+      create_primary | tee -a "$STATUS"
+    else
+      create_repos | tee -a "$STATUS"
+    fi
+    archive_job | tee -a "$STATUS"
+    #svn_depth
+    report | tee -a "$STATUS"
+    echo "SUCCESS: Conversion complete" | tee -a "$STATUS"
+    exit 0
+  fi
+}
+
+#DEFAULTS
+config ()
+{
+    local prefix=$2
+    local s='[[:space:]]*' w='[a-zA-Z0-9_]*'
+    fs=$(echo @|tr @ '\034')
+    sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+    awk -F$fs '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'$prefix'",vn, $2, $3);
+      }
+    }'
+}
+
+set_vars ()
+{
+  if [ -n "$GITHUB" ]; then
+    export GITHUB="$GITHUB"
+  else
+    export GITHUB="github.com"
+  fi
+  if [ -n "$GITHUB_API" ]; then
+    export GITHUB_API="$GITHUB_API"
+  else
+    export GITHUB_API="https://$GITHUB/api/v3"
+  fi
+  if [ -n "$BFG_DOWNLOAD" ]; then
+    export BFG_DOWNLOAD="$BFG_DOWNLOAD"
+  else
+    export BFG_DOWNLOAD="http://repo1.maven.org/maven2/com/madgag/bfg/1.12.15/bfg-1.12.15.jar"
+  fi
+  if [ -n "$LFS_DOWNLOAD" ]; then
+    export LFS_DOWNLOAD="$LFS_DOWNLOAD"
+  else
+    export LFS_DOWNLOAD="https://packagecloud.io/github/git-lfs/packages/el/7/git-lfs-2.1.1-1.el7.x86_64.rpm/download"
+  fi
+  if [ -n "$DEFAULT_DOMAIN" ]; then
+    export DEFAULT_DOMAIN="$DEFAULT_DOMAIN"
+  else
+    export DEFAULT_DOMAIN="yourdomain.com"
+  fi
+  export HEADER="-H 'Content-Type: application/json' -H 'Accept: application/vnd.github.v3+json'"
+  export RETRY=2
+  export SLEEP_TIME=8
+  export SUB_STRING='SuBMoDuL3-'
+  export SAVEIFS=$IFS
+  if [ -z "$SVN_REPO" ] || [ "$(echo "$SVN_REPO"|grep '/.*:.*@')" ] || [ -n "$SVN_USER" ]; then
+    if [ -z "$SVN_REPO" ]; then
+      echo "Please enter the svn source url, acceptable formats are: http:/// , https:/// , svn:// , svn+ssh://"
+      read SVN_REPO
+    fi
+    if [ "$(echo "$SVN_REPO"|grep '/.*:.*@')" ] || [ -n "$SVN_USER" ]; then
+      if [ -z "$SVN_USER" ]; then
+        echo "Enter svn Username now."
+        read SVN_USER
+        export SVN_USER
+      fi
+      if [ -z "$SVN_PASS" ]; then
+        echo "Enter the Password for the svn user \"$SVN_USER\" now."
+        read -s SVN_PASS
+        export SVN_PASS
+      fi
+      if [ "$(echo "$SVN_REPO"|grep '/.*:.*@')" ]; then
+        echo "Please re-enter the svn source url without any credentials, acceptable formats are: http:/// , https:/// , svn:// , svn+ssh://"
+        read svn_repo
+        SVN_REPO=$(echo "$svn_repo"|sed s/\\/\\//\\/\\/"$SVN_USER"@/g)
+      else
+        SVN_REPO=$(echo "$SVN_REPO"|sed s/\\/\\//\\/\\/"$SVN_USER"@/g)
+      fi
+    fi
+    export SVN_REPO
+  fi
+  export IFS=$(echo -en "\n\b")
+  if [ -n "$RENAME" ]; then
+    export REPO_NAME="$RENAME"
+    export REPO_NAME_lower="$(echo "$REPO_NAME"|awk '{print tolower($0)}')"
+    export REPO_NAME_ORIG="$(echo "$SVN_REPO"|sed 's:/*$::'|rev|awk -F "/" '{print $1}'|rev)"
+  else
+    export REPO_NAME="$(echo "$SVN_REPO"|sed 's:/*$::'|rev|awk -F "/" '{print $1}'|rev)"
+    export REPO_NAME_lower=$(echo "$REPO_NAME"|awk '{print tolower($0)}')
+    export REPO_NAME_ORIG=$REPO_NAME
+  fi
+  export EVC=$(echo "$SVN_REPO"|awk -F "/$REPO_NAME" '{print $1}')
+  if [ -z "$DATA_DIR" ]; then
+    DATA_DIR="/opt/svn-to-github/data"
+  fi
+  export WORK_DIR="$DATA_DIR/$REPO_NAME"
+  if [ "$(echo "$SVN_REPO"|grep -iE '^http://|^https://|^svn://|^ssh://|^svn+ssh://')" ]; then
+    export SVN_DIR="$WORK_DIR/$REPO_NAME"
+  elif [ "$(echo "$SVN_REPO"|grep -iE '^file://')" ]; then
+    echo "WARNING: Using default EVC Repo Root URL of $EVC to source meta-data"
+    export SVN_DIR="$(echo "$SVN_REPO"|awk -F 'file://' '{print $2}')"
+  else
+    echo "Acceptable --svn=\$SOURCE formats are:"
+    echo "                       http://url/to/repo"
+    echo "                       https://url/to/repo"
+    echo "                       svn://url/to/repo"
+    echo "                       ssh://path/to/repo"
+    echo "                       file:///path/to/repo"
+fi
+
+  # Install
+  export AUTHORPROG="/opt/svn-to-github/author_default.sh"
+  export BFGPROG="/opt/svn-to-github/bfg-1.12.12.jar"
+  if [ -n "$DATA_ARCHIVE" ]; then
+    export JOB_DIR="$DATA_ARCHIVE"
+  else
+    export JOB_DIR="$DATA_DIR/archive"
+  fi
+
+  # Var Dirs
+  export SVN_DIR="$WORK_DIR/$REPO_NAME"
+  export TMP_DIR="$WORK_DIR/git"
+  export LOG_DIR="$WORK_DIR/log"
+  export RPO_DIR="$WORK_DIR/github"
+  export SUB_DIR="$WORK_DIR/submodules"
+  export CLN_DIR="$LOG_DIR/clone"
+  export CVT_DIR="$LOG_DIR/convert"
+  export PSH_DIR="$LOG_DIR/push"
+  export LFS_DIR="$LOG_DIR/bfg-lfs"
+
+  # Logs
+  export RTYLOG="$LOG_DIR/retry.log"
+  export COLOG="$LOG_DIR/checkout.log"
+  export CNLOG="$LOG_DIR/clone.log"
+  export STATUS="$LOG_DIR/status.log"
+  export SVNLOG="$LOG_DIR/svnserve.log"
+  export CNVLOG="$LOG_DIR/convert.log"
+  export CRTLOG="$LOG_DIR/create.log"
+  export UNDLOG="$LOG_DIR/undo.log"
+  export PHLOG="$LOG_DIR/push.log"
+  export IMPLOG="$LOG_DIR/import.log"
+  export FAMILY="$LOG_DIR/family.log"
+  export GHLOG="$LOG_DIR/github.log"
+  export LFSLOG="$LOG_DIR/lfs.log"
+  export PRNLOG="$LOG_DIR/parent.log"
+  export BFGLOG="$LOG_DIR/bfg.log"
+  export RPTLOG="$LOG_DIR/report.log"
+  export CPLOG="$LOG_DIR/copy.log"
+  export DBGLOG="$LOG_DIR/debug.log"
+
+  if [ ! -d "$WORK_DIR" ]; then
+    mkdir -p "$WORK_DIR"
+  fi
+
+  if [ ! -d "$JOB_DIR" ]; then
+    mkdir -p "$JOB_DIR"
+  fi
+
+  if [ ! -d "$LOG_DIR" ]; then
+    mkdir -p "$LOG_DIR"
+  fi
+
+  if [ ! -d "$RPO_DIR" ]; then
+    mkdir -p "$RPO_DIR"
+  fi
+
+  if [ -z "$AUTHORS_FILE" ]; then
+    export AUTHORS_FILE="$WORK_DIR/authors.log"
+    export IMPORT_AUTHORS=true
+  fi
+
+  if [ -z "$IGNORE_FILE" ]; then
+    export IGNORE_FILE="$WORK_DIR/gitignore.log"
+    export IMPORT_IGNORE=true
+  fi
+
+  if [ ! -f "$STATUS" ]; then
+    touch "$STATUS"
+  fi
+
+  if [ -z "$ALT_TAGS" ]; then
+    export ALT_TAGS=""
+  fi
+
+  if [ -z "$PREFIX" ] && [ -z "$ALT_TAGS" ]; then
+    export TAG='((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g))'
+  elif [ -z "$PREFIX" ] && [ -n "$ALT_TAGS" ]; then
+    export TAG="($ALT_TAGS|((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g))"
+  elif [ -n "$PREFIX" ] && [ -n "$ALT_TAGS" ]; then
+    export TAG="($ALT_TAGS|((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g))|$PREFIX((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g)))"
+  else
+    export TAG="($PREFIX(((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g))|((T|t)(A|a)(G|g)(S|s)|(T|t)(A|a)(G|g)))"
+  fi
+
+  if [ -z "$ALT_BRANCH" ] ; then
+    export ALT_BRANCH=""
+  fi
+
+  if [ -z "$PREFIX" ] && [ -z "$ALT_BRANCH" ]; then
+    export BRANCH='((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h))'
+  elif [ -z "$PREFIX" ] && [ -n "$ALT_BRANCH" ]; then
+    export BRANCH="($ALT_BRANCH|((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h)))"
+  elif [ -n "$PREFIX" ] && [ -n "$ALT_BRANCH" ]; then
+    export BRANCH="($ALT_BRANCH|((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h))|$PREFIX((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h)))"
+  else
+    export BRANCH="($PREFIX((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h))|((B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)|(B|b)(R|r)(A|a)(N|n)(C|c)(H|h)))"
+  fi
+
+  if [ -z "$ALT_TRUNK" ] ; then
+    export ALT_TRUNK=""
+  fi
+
+  if [ -z "$PREFIX" ] && [ -z "$ALT_TRUNK" ]; then
+    export TRUNK='(T|t)(R|r)(U|u)(N|n)(K|k)'
+  elif [ -z "$PREFIX" ] && [ -n "$ALT_TRUNK" ]; then
+    export TRUNK="($ALT_TRUNK|(T|t)(R|r)(U|u)(N|n)(K|k))"
+  elif [ -n "$PREFIX" ] && [ -n "$ALT_TRUNK" ]; then
+    export TRUNK="($ALT_TRUNK|(T|t)(R|r)(U|u)(N|n)(K|k)|$PREFIX(T|t)(R|r)(U|u)(N|n)(K|k))"
+  else
+    export TRUNK="($PREFIX(T|t)(R|r)(U|u)(N|n)(K|k)|(T|t)(R|r)(U|u)(N|n)(K|k))"
+  fi
+
+  if [ -z "$LFS_LIMIT" ]; then
+    export LFS="50"
+  else
+    export LFS="$LFS_LIMIT"
+  fi
+
+  if [ -z "$BFG_LIMIT" ]; then
+    export BLOB_LIMIT="50"
+  else
+    export BLOB_LIMIT="$BFG_LIMIT"
+  fi
+
+  # BOOL DEFAULTS
+  if [ "$UNDO" != true ] ; then
+    export UNDO=false
+  fi
+
+  if [ "$FORCE" != true ] ; then
+    export FORCE=false
+  fi
+
+  if [ "$TAG_BRANCH" != false ] ; then
+    export TAG_BRANCH=true
+  fi
+
+  if [ "$BRANCHES" != false ]; then
+    export BRANCHES=true
+  fi
+
+  if [ "$TAGS" != false ] ; then
+    export TAGS=true
+  fi
+
+  if [ "$CHECK_SIZE" != true ] ; then
+    export CHECK_SIZE=false
+  fi
+
+  if [ "$INSTALL" != true ] ; then
+    export INSTALL=false
+  fi
+
+  if [ "$PRIVATE" != 'true' ] ; then
+    export PRIVATE='false'
+  fi
+
+  if [ "$NOORG" != true ] ; then
+    export NOORG=false
+  fi
+
+  if [ "$PRESERVE_TRUNK" != false ] ; then
+    export PRESERVE_TRUNK=true
+  fi
+
+  if [ "$SAFE" != true ] ; then
+    export SAFE=false
+  fi
+
+  if [ "$DRYRUN" != true ] ; then
+    export DRYRUN=false
+  fi
+
+  # Layout ARGS
+  if [ -n "$PREFIX" ]; then
+    export LAYOUT="--prefix $PREFIX"
+  else
+    if [ -n "$ALT_BRANCH" ]; then
+      if [ -f "$ALT_BRANCH" ]; then
+        for alt in $(cat "$ALT_BRANCH"|sed s/','/' '/g); do
+          branch_layout="$(echo "$branch_layout" -b "$alt")"
+        done
+      else
+          branch_layout="-b $ALT_BRANCH"
+      fi
+    fi
+    if [ -n "$ALT_TRUNK" ]; then
+      if [ -f "$ALT_TRUNK" ]; then
+        for alt in $(cat $ALT_TRUNK|sed s/','/' '/g); do
+          trunk_layout="$(echo "$trunk_layout" -T "$alt")"
+        done
+      else
+          trunk_layout="-T $ALT_TRUNK"
+      fi
+    fi
+    if [ -n "$ALT_TAGS" ]; then
+      if [ -f "$ALT_TAGS" ]; then
+        for alt in $(cat "$ALT_TAGS"|sed s/','/' '/g); do
+          tag_layout="$(echo "$tag_layout" -b "$alt")"
+        done
+      else
+          tag_layout="-t $ALT_TAGS"
+      fi
+    fi
+    if [ -n "$ALT_TAGS" ] && [ -n "$ALT_TRUNK" ] && [ -n "$ALT_BRANCH" ]; then
+      export LAYOUT="$branch_layout $tag_layout $trunk_layout"
+    elif [ -n "$ALT_TAGS" ] && [ -n "$ALT_TRUNK" ] && [ -z "$ALT_BRANCH" ]; then
+      export LAYOUT="$tag_layout $trunk_layout"
+    elif [ -n "$ALT_TAGS" ] && [ -z "$ALT_TRUNK" ] && [ -n "$ALT_BRANCH" ]; then
+      export LAYOUT="$tag_layout $branch_layout"
+    elif [ -z "$ALT_TAGS" ] && [ -n "$ALT_TRUNK" ] && [ -n "$ALT_BRANCH" ]; then
+      export LAYOUT="$trunk_layout $branch_layout"
+    elif [ -z "$ALT_TAGS" ] && [ -z "$ALT_TRUNK" ] && [ -n "$ALT_BRANCH" ]; then
+      export LAYOUT="$branch_layout"
+    elif [ -z "$ALT_TAGS" ] && [ -z "$ALT_TRUNK" ] && [ -n "$ALT_BRANCH" ]; then
+      export LAYOUT="$branch_layout"
+    elif [ -z "$ALT_TAGS" ] && [ -n "$ALT_TRUNK" ] && [ -z "$ALT_BRANCH" ]; then
+      export LAYOUT="$trunk_layout"
+    elif [ -n "$ALT_TAGS" ] && [ -z "$ALT_TRUNK" ] && [ -z "$ALT_BRANCH" ]; then
+      export LAYOUT="$tag_layout"
+    else
+      export LAYOUT="--stdlayout"
+    fi
+  fi
+}
+
+#### EXIT FAST
+fail ()
+{
+  if [ "$(grep 'FAILURE:' "$STATUS")" ]; then
+    echo "$(grep 'FAILURE:' "$STATUS"|uniq)"
+    report
+    exit 1
+  else
+    return 1
+  fi
+}
+
+test_github ()
+{
+  if ! $NOORG ; then
+    echo "Checking github organization permissions..." | tee -a "$STATUS"
+    gh_test_org
+  fi
+  if ! $UNDO ; then
+    echo "Checking for name conflict in github for \"$REPO_NAME\"" | tee -a "$STATUS"
+    gh_test_repo
+  fi
+}
+
+gh_test_org ()
+{
+  if [ "$(curl -s "$AUTH" "$GITHUB_API/user/orgs"|grep login|grep "$ORG")" ]; then
+    echo "SUCCESS: User \"$NTID\" has access to \"$ORG\"." >> "$STATUS"
+  else
+    echo "FAILURE: User \"$NTID\" is not a member of \"$ORG\", or \"$ORG\" does not exist." >> "$STATUS"
+    fail
+  fi
+}
+
+gh_test_repo ()
+{
+  if $NOORG ; then
+    if [ ! "$(curl -s "$AUTH" "$GITHUB_API/users/$NTID/repos"|grep -F '"name":'|grep "$REPO_NAME"$)" ]; then
+      echo "SUCCESS: Repository \"$REPO_NAME\" does not yet exist under \"$NTID\"." >> "$STATUS"
+    else
+      echo "FAILURE: Repo \"$REPO_NAME\" already exists under user \"$NTID\" try re-running with --new-name=repo_name" >> "$STATUS"
+      fail
+    fi
+  else
+    if [ ! "$(curl -s "$AUTH" "$GITHUB_API/orgs/$ORG/repos"|grep -F '"name":'|grep "$REPO_NAME"$)" ]; then
+      echo "SUCCESS: Repository \"$REPO_NAME\" does not yet exist in organization \"$ORG\"." | tee -a "$STATUS"
+    else
+      echo "FAILURE: Repo \"$REPO_NAME\" already exists in \"$ORG\" try re-running with --new-name=repo_name" >> "$STATUS"
+      fail
+    fi
+  fi
+}
+
+check_size ()
+{
+  if [ ! "$(echo "$SVN_REPO"| grep -Ei '^file://')" ]; then
+    repo_file_info=$(svn list -vR "$SVN_REPO"|awk '{if ($3 !="") sum+=$3} END {print sum}')
+    repo_approx_size=$(expr "$(echo "$repo_file_info")" * 1.25 )
+  else
+    repo_file_info=$(du -s "$SVN_DIR"|awk '{print $1}')
+    repo_approx_size="$repo_file_info"
+  fi
+
+  avail=$(expr "$(df "$WORK_DIR"|grep ^/|awk '{print $4}')" - 0 )
+  needed=$(expr "$repo_approx_size" * 2.25 )
+
+  if [ "$avail" -gt "$needed" ]; then
+    echo "SUCCESS: Disk space is adequate..." | tee -a "$STATUS"
+    return 0
+  else
+    echo "FAILURE: Disk space in work-dir \"$WORK_DIR\" only has $avail Bytes available and $needed are needed." >> "$STATUS"
+    fail
+  fi
+}
+
+#### PROMPTS
+interactive ()
+{
+  if [ -z "$ORG" ] && [ "$NOORG" == false ]; then
+    echo "Please enter the github Orgnaization, or re-run with --no-org to save repositories under NTID namespace instead of Organization namespace."
+    read ORG
+    export ORG
+  fi
+  if [ -z "$NTID" ]; then
+    echo "Please enter the NTID of a member of \"$ORG\"."
+    read NTID
+    export NTID
+  fi
+  if [ -z "$TOKEN" ]; then
+    echo "Please enter the Personal Access Token for \"$NTID\"."
+    read -s TOKEN
+    export TOKEN
+  fi
+  export AUTH="-u $NTID:$TOKEN"
+}
+
+gh_auth ()
+{
+  if [ "$(curl -s "$AUTH" "$GITHUB_API/user"|grep login|grep "$NTID")" ]; then
+    echo "SUCCESS: Authentication worked!"
+  else
+    echo "FAILURE: Authentication failed."
+    export ORG=""
+    export NTID=""
+    export TOKEN=""
+    export RETRY=$(expr $RETRY - 1)
+      if [ "$RETRY" -gt 0 ]; then
+        interactive
+      else
+        echo "FAILURE: Failed to authenticate user $NTID with token $TOKEN to $GITHUB $RETRY times." >> "$STATUS"
+        fail
+      fi
+  fi
+}
+
+safe_prompt ()
+{
+  if ! $FORCE ; then
+    answer=""
+    echo "WARNING: SAFE-MODE ENABLED. To create repo $1 in github, type 'yes' (case-sensitive)"
+    read answer
+    if [ "$answer" != 'yes' ]; then
+      return 1
+    else
+      return 0
+    fi
+  else
+    return 0
+  fi
+}
+
+#### TESTS
+has_trunk ()
+{
+  if [ -n "$(find "$1" -maxdepth 1 -type d -regextype posix-extended -regex "^.*/$TRUNK")" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+has_tags ()
+{
+  if [ "$(ls -l "$1"|grep ^d|grep -qE "$TAG")" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+has_branches ()
+{
+  if [ "$(ls -l "$1"|grep ^d|grep -qE "$BRANCH")" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is_stdlayout ()
+{
+  if has_trunk "$1" &> /dev/null && has_branches "$1" &> /dev/null && has_tags "$1" &> /dev/null ; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is_empty ()
+{
+  if [ -z "$(find "$1" -type f -print -quit)" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+gh_conflict ()
+{
+  if $NOORG ; then
+    check=$(curl -s "$AUTH" "$GITHUB_API/users/$NTID/repos"|grep -F '"name":'|grep "$1")
+  else
+    check=$(curl -s "$AUTH" "$GITHUB_API/orgs/$ORG/repos"|grep -F '"name":'|grep "$1")
+  fi
+  if [ "$check" -ne 0 ]; then fail ; fi
+}
+
+#### ACTIONS
+create_repo ()
+{
+  if [ -f "$RPO_DIR/$1.json" ] && [ ! $FORCE ]; then
+    echo "WARNING: $1.json already exists, overriding with --force, may result in a duplicate repo in github." | tee -a "$STATUS"
+  elif [ $FORCE ] || [ ! -f "$RPO_DIR/$1.json" ]; then
+    create=true
+    desc=$(echo "$2"|sed s/\\/\\/.*@/\\/\\//g)
+
+    if $SAFE ; then
+      if [ ! "$(safe_prompt "$1")" ] && [ "$UNDO" == false ]; then
+        echo "WARNING: $1 was not confirmed in the --safe mode prompt, and was skipped from conversion."
+        create=false
+      fi
+    fi
+
+    if $create ; then
+cat <<EOF > "$RPO_DIR"/"$1".json
+{
+  "name": "$1",
+  "description": "$desc",
+  "homepage": "",
+  "private": $PRIVATE,
+  "has_issues": true,
+  "has_wiki": true,
+  "has_downloads": true
+}
+EOF
+      if ! $UNDO ; then
+        if $NOORG ; then
+          curl -X POST -s "$AUTH" "$GITHUB_API/user/repos" --data "@$RPO_DIR/$1.json" >> "$GHLOG" 2>&1
+          result=$?
+          if [ "$result" -eq 0 ]; then
+            echo "SUCCESS: $1 repository created at https://$GITHUB/$NTID/$1" | tee -a "$CRTLOG" "$STATUS"
+          else
+            echo "RETRYING: create_repo $1" >> "$RTYLOG"
+            retry curl -X POST -s "$AUTH" "$GITHUB_API"/user/repos --data @"$RPO_DIR"/"$1".json
+          fi
+        else
+          curl -X POST -s "$AUTH" "$GITHUB_API/orgs/$ORG/repos" --data "@$RPO_DIR/$1.json" >> "$GHLOG" 2>&1
+          result=$?
+          if [ "$result" -eq 0 ]; then
+            echo "SUCCESS: $1 repository created at https://$GITHUB/$ORG/$1" | tee -a "$CRTLOG" "$STATUS"
+          else
+            echo "RETRYING: create_repo $1" >> "$RTYLOG"
+            retry curl -X POST -s "$AUTH" "$GITHUB_API"/orgs/"$ORG"/repos --data @"$RPO_DIR"/"$1".json
+          fi
+        fi
+      fi
+    fi
+  fi
+}
+
+gh_delete ()
+{
+  delete=true
+
+  if $SAFE ; then
+    if [ ! "$(safe_prompt "$1")" ]; then
+      echo "WARNING: $1 was not confirmed in the --safe mode prompt, and was skipped from deletion."
+      delete=false
+    fi
+  fi
+
+  if $delete ; then
+    if $NOORG ; then
+      curl -X DELETE -s "$AUTH" "$GITHUB_API/repos/$NTID/$1" >> "$GHLOG" 2>&1
+      result=$?
+    else
+      curl -X DELETE -s "$AUTH" "$GITHUB_API/repos/$ORG/$1" >> "$GHLOG" 2>&1
+      result=$?
+    fi
+    if [ "$result" -eq 0 ]; then
+      if $NOORG ; then
+        echo "SUCCESS: $1 repository removed from github at https://$GITHUB/$NTID/$1" | tee -a "$UNDLOG" "$STATUS"
+      else
+        echo "SUCCESS: $1 repository created at https://$GITHUB/$ORG/$1" | tee -a "$UNDLOG" "$STATUS"
+      fi
+    else
+      echo "FAILURE: $1 failed to remove, see \"$GHLOG\" for details." >> "$STATUS"
+      fail
+    fi
+  fi
+}
+
+author_prog ()
+{
+cat <<EOF > $AUTHORPROG
+#!/bin/bash
+echo "\$1 <\$1>";
+EOF
+chmod +x "$AUTHORPROG"
+}
+
+#TODO - Unused
+#svn_depth ()
+#{
+#  cd "$SVN_DIR"
+#  echo "" > "$FAMILY"
+#  MAX_DEPTH=$(echo $MODULES|sed  s/' '/"_"/g|awk -F "$SVN_DIR" '{print $2}'|awk -F "/" '{print NF - 1}'|sort -nr|head -n1)
+#
+#  if [ "$MAX_DEPTH" -gt 6 ];then
+#    echo "WARNING: Tree depth too deep to label as family" | tee -a "$STATUS"
+#  fi
+#
+#  for i in $(seq 1 $MAX_DEPTH)
+#  do
+#    COUNT=$(echo $MODULES|sed  s/' '/"_"/g|awk -F "$SVN_DIR" '{print $2}'|awk -F "/" '{print NF - 1 }'|grep "$i"|wc -l)
+#    min_depth=$(expr $i + 1)
+#    if [ "$i" -eq 1 ]; then
+#      echo "$COUNT svn siblings found." >> "$FAMILY"
+#    elif [ "$i" -eq 2 ]; then
+#      echo "$COUNT svn children found." >> "$FAMILY"
+#    elif [ "$i" -eq 3 ]; then
+#      echo "$COUNT svn grandchildren found." >> "$FAMILY"
+#    elif [ "$i" -eq 4 ]; then
+#      echo "$COUNT svn great grandchildren found." >> "$FAMILY"
+#    elif [ "$i" -eq 5 ]; then
+#      echo "$COUNT svn great great grandchildren found." >> "$FAMILY"
+#    elif [ "$i" -eq 6 ]; then
+#      echo "$COUNT svn great great great grandchildren found." >> "$FAMILY"
+#    else
+#      echo "$COUNT svn repos found at depth $i" >> "$FAMILY"
+#    fi
+#  done
+#
+#  export MOD_COUNT=$(echo $MODULES|wc -w)
+#}
+
+get_parent ()
+{
+  if [ -d "$1" ]; then
+    cd "$1"
+    local parent=""
+
+    while [ "$(pwd)" != "$SVN_DIR" ] && [ -z "$parent" ]; do
+      if has_trunk "$(dirname "$(pwd)")" ; then
+        if [ "$(dirname "$(pwd)"|grep -E /"$TRUNK"$)" ]; then
+          cd ../
+        else
+          parent="$SUB_STRING$(basename "$(dirname "$(pwd)")")"
+        fi
+      else
+        cd ../
+      fi
+    done
+
+    if [ -z "$parent" ]; then
+      if [ "$(basename "$(dirname "$1")"|grep ^$SUB_STRING)" ]; then
+        echo "FAILURE: Cannot process directory that begins with \"$SUB_STRING\"" >> "$STATUS"
+        fail
+      else
+        local nearest_parent="$(basename "$(dirname "$1")")"
+        if [ ! "$(echo "$nearest_parent"|grep -E "$TRUNK")" ]; then
+          local parent="$nearest_parent"
+        else
+          local parent="$REPO_NAME_lower"
+        fi
+      fi
+    fi
+
+    echo "$parent"
+  else
+    echo "FAILURE: $1 is missing, Unknown Error." >> "$STATUS"
+    fail
+  fi
+}
+
+#Only called for known submodules with children
+get_parent_path ()
+{
+  if [ -d "$1" ]; then
+    cd "$1"
+    while [ "$1" != "$SVN_DIR" ] && [ -z "$parent_path" ]; do
+      if has_trunk "$(dirname "$1")" ; then
+        if [ "$(echo "$(dirname "$1")"|grep -E "$TRUNK")" ]; then
+          parent_path="$(dirname "$(dirname "$1")")"
+        else
+          parent_path="$(dirname "$1")"
+        fi
+      else
+        cd ../
+      fi
+    done
+
+    echo "$parent_path"
+  else
+    echo "FAILURE: $1 is missing, Unknown Error." >> "$STATUS"
+    fail
+  fi
+}
+
+#Only called for known submodules with children
+get_child_path ()
+{
+  cd "$1" && cd ../
+
+  until has_trunk "$(pwd)" ; do
+    cd ../
+  done
+  child_path=$(echo "$1"| awk -F "$(basename "$(pwd)")/" '{print $2}')
+
+  echo "$child_path"
+}
+
+resolve_name ()
+{
+
+  local name=$(basename "$1"|sed s/' '/_/g)
+  local prefix=$REPO_NAME_lower
+  local parent_name=$(get_parent "$1"|sed s/' '/_/g)
+
+  if [ "$parent_name" == "$REPO_NAME_lower" ]; then
+    test_name="$prefix-$name"
+  elif [ ! "$(echo "$parent_name"|grep ^$SUB_STRING)" ]; then
+    test_name="$prefix-$parent_name-$name"
+  else
+    parent_trunk=$(echo "$parent_name"|sed s/"^$SUB_STRING"/""/g)
+    test_name="$prefix--$parent_trunk-$name"
+  fi
+  if ! $DRYRUN ; then
+    if gh_conflict "$test_name" ; then
+      suffix=0
+      until ! gh_conflict "$test_name-$suffix"
+      do
+        suffix=$(expr $suffix + 1)
+      done
+      gh_name="$test_name-$suffix"
+    else
+      gh_name="$test_name"
+    fi
+  else
+    gh_name="$test_name"
+  fi
+  echo "$gh_name"
+}
+
+create_submodules ()
+{
+  if [ -n "$MODULES" ]; then
+    echo "Creating submodules in github..."
+    declare -gA SubModules
+    declare -gA ClonePids
+    declare -gA ConvertPids
+    declare -gA ModuleNames
+    declare -gA ModulePaths
+    declare -gA ModuleUrls
+    declare -gA ModuleRelatives
+    declare -gA ChildPaths
+    declare -ga ModuleOrigins
+    declare -ga Modules
+
+    if [ ! -d "$SUB_DIR" ]; then
+      mkdir "$SUB_DIR"
+    fi
+    #for module in $(echo "$MODULES"|grep Entitlements|head -2) ; do #submodule test
+    #for module in $(echo "$MODULES"|grep ETLConversion|head -3) ; do #submodule test
+    #TODO DEBUG
+    for module in $MODULES ; do #full run
+      local relative_path=$(echo "$module"|awk -F "$SVN_DIR/" '{print $2}')
+      local name=$(basename "$module")
+      local real_name=$(resolve_name "$module")
+
+      if is_empty "$module"; then
+        echo "NOTICE: Skipping EMPTY \"$name\"" >> "$STATUS"
+      else
+        if [ ! -f "$RPO_DIR/$real_name.json" ] || [ "$DRYRUN" == true ] ; then
+          #Setup Arrays
+          SubModules["$real_name"]="" #for adding submodules
+          ClonePids["$real_name"]="" #for tracking Pids of Clone jobs
+          ConvertPids["$real_name"]="" #for tracking Pids of Convert jobs
+          ModuleNames["$real_name"]="$name" #for name tanslation
+          ModuleUrls["$real_name"]="$EVC/$REPO_NAME_ORIG/$relative_path" #for cloning svn
+          ModulePaths["$real_name"]="$module" #for location reference
+          ModuleRelatives["$real_name"]="$relative_path" #for et_al filter exception
+          ModuleOrigins+=("$relative_path",) #for et_al filter
+          Modules+=("$real_name") #for multi-threading loops
+
+          if [ "$(echo "$real_name"|grep -E ^"$REPO_NAME_lower"--)" ]; then
+            #Create list "$SUB_DIR/$real_parent" of nested submodules
+            ChildPaths["$real_name"]="$(get_child_path "$module")" #for location reference of nested repo
+            real_parent="$(resolve_name "$(get_parent_path "$module")")"
+            echo "$real_name" >> "$SUB_DIR/$real_parent"
+          else
+            echo "$real_name" >> "$SUB_DIR/$REPO_NAME"
+            real_parent=$REPO_NAME
+          fi
+          if ! $DRYRUN ; then
+            #Create the repo in github
+            submodule_repo "$real_name" "$real_parent"
+          fi
+        fi
+      fi
+    done
+  fi
+}
+
+add_submodules ()
+{
+  if [ -f "$SUB_DIR/$1" ] && [ "$UNDO" == false ]; then
+    cd "$TMP_DIR/$1.git"
+
+    declare -A Children
+
+    #Create Array of Children
+    for child in $(cat "$SUB_DIR/$1"); do
+      Children["$child"]="$child"
+    done
+
+    #Loop through processing children until all children are done cloning
+    while [ "${#Children[@]}" -ne 0 ]; do
+      for child in "${Children[@]}" ; do
+        #echo "DEBUG child is $child"
+        clone_pid=${SubModules["$child"]} #race condition for submodules of submodules
+        #echo "DEBUG clonepid $clone_pid"
+        convert_pid=${ConvertPids["$child"]} #race condition of submodules of primary repo
+        #echo "DEBUG convertpid $convert_pid"
+        if [ "$1" == "$REPO_NAME" ]; then
+          original_path=${ModuleRelatives["$child"]}
+        else
+          original_path=${ChildPaths["$child"]}
+        fi
+
+        if ([ "$(ps aux|awk '{print $2}'|grep ^$clone_pid$)" ] && [ -n "$clone_pid" ]) || ([ "$(ps aux|awk '{print $2}'|grep ^$convert_pid$)" ] && [ -n "$convert_pid" ]); then
+          echo "Waiting for child submodule(s) to finish converting. Sleeping $SLEEP_TIME seconds..." | tee -a "$STATUS"
+          sleep $SLEEP_TIME
+        else
+          if $NOORG ; then
+            add_url="https://$NTID:$TOKEN@$GITHUB/$NTID/$child.git"
+          else
+            add_url="https://$NTID:$TOKEN@$GITHUB/$ORG/$child.git"
+          fi
+
+          git submodule add "$add_url" "$original_path" &>> "$PRNLOG"
+          result=$?
+          if [ "$result" -ne 0 ]; then
+            echo "RETRYING: add_submodules $1" >> "$RTYLOG"
+            retry git submodule add "$add_url" "$original_path"
+          fi
+          unset Children["$child"]
+        fi
+      done
+    done
+    unset Children
+
+    #Remove NTID & Token from git URL
+    sed -i s/https:\\/\\/$NTID:$TOKEN@$GITHUB\\//git@$GITHUB:/g .gitmodules
+
+    #Add submodules to repo
+    git add .gitmodules
+    echo "SUCCESS: All svn-sub-repos for $1 finished converting to git submodules!"
+  fi
+}
+
+multi_thread ()
+{
+  echo "Converting submodules of \"$REPO_NAME\" to git..." | tee -a "$STATUS"
+  while [ "${#ClonePids[@]}" -ne 0 ]; do
+    for module in "${Modules[@]}" ; do
+      pid=${ClonePids["$module"]}
+      module_path=${ModulePaths["$module"]}
+
+      if [ ! -d "$TMP_DIR/$module.git" ] && [ -z "$pid" ]; then
+          git_clone "$module" &
+          ClonePids["$module"]=$!
+          SubModules["$module"]=${ClonePids["$module"]} #resolve race condition for cloning and adding multiple submodules
+      elif [ -n "$pid" ] && [ ! "$(ps aux|awk '{print $2}'|grep ^$pid$)" ] && [ -d "$TMP_DIR/$module.git" ]; then
+        unset ClonePids["$module"]
+        convert "$module" &
+        ConvertPids["$module"]=$!
+      fi
+    done
+    echo "Waiting for submodule clone(s) to complete. Sleeping $SLEEP_TIME seconds..." | tee -a "$STATUS"
+    sleep $SLEEP_TIME
+  done
+  echo "SUCCESS: All submodules finished cloning!" | tee -a "$STATUS"
+}
+
+submodule_repo ()
+{
+  if $NOORG ; then
+    create_repo "$1" "Submodule of $2 at https://$GITHUB/$NTID/$2"
+  else
+    create_repo "$1" "Submodule of $2 at https://$GITHUB/$ORG/$2"
+  fi
+}
+
+
+create_repos ()
+{
+  if [ -n "$MODULES" ] && [ "$DRYRUN" == false ]; then
+    create_submodules
+    if $SAFE; then
+      single_thread
+    else
+      multi_thread
+    fi
+  fi
+  create_primary
+}
+
+git_ignore ()
+{
+  cd "$TMP_DIR/$1.git"
+  git svn show-ignore > .gitignore
+  if [ -s .gitignore ]; then
+    if [ ! -f "$IGNORE_FILE" ]; then
+      ignore
+    fi
+    cat "$IGNORE_FILE" > .gitignore
+  fi
+  git add .gitignore &>> "$CNVLOG"
+
+  #TODO add Sync back option here #SYNC DOES NOT ALLOW FOR BFG
+  git config --remove-section svn-remote.svn
+}
+
+git_add_remote ()
+{
+  if $NOORG ; then
+    if [ ! "$(git remote -v|grep origin|grep "https://$NTID:$TOKEN@$GITHUB/$NTID/$1.git")" ]; then
+      git remote add origin "https://$NTID:$TOKEN@$GITHUB/$NTID/$1.git"
+    fi
+  else
+    if [ ! "$(git remote -v|grep origin|grep "https://$NTID:$TOKEN@$GITHUB/$ORG/$1.git")" ]; then
+      git remote add origin "https://$NTID:$TOKEN@$GITHUB/$ORG/$1.git"
+    fi
+  fi
+}
+
+retry ()
+{
+  if [ "$UNDO" == true ]; then
+    return 0
+  else
+    retry=1
+    until $@ ; do
+      echo "RETRY #$retry : $@" | tee -a "$RTYLOG"
+      sleep $SLEEP_TIME
+      retry=$(expr $retry + 1)
+      if [ "$retry" -eq 3 ]; then
+        echo "RETRY #$retry : $@" | tee -a "$RTYLOG"
+        echo "$@"|bash
+        result=$?
+        if [ "$result" -ne 0 ]; then
+          echo "FAILURE: $@" | tee -a "$STATUS" "$RTYLOG"
+        else
+          echo "SUCCESS: $@"| tee -a "$STATUS" "$RTYLOG"
+        fi
+        break
+      fi
+    done
+  fi
+}
+
+convert ()
+{
+  cd "$TMP_DIR/$1.git"
+
+  git config --global push.default upstream
+
+  if [ "$(git branch -a|grep [[:space:]]master$)" ]; then
+    if [ ! "$(git branch -a|grep \*[[:space:]]master$)" ]; then
+      git checkout master &>> "$CNVLOG"
+    fi
+  else
+    git checkout -b master &>> "$CNVLOG"
+  fi
+
+  git_ignore "$1" | tee -a "$STATUS"
+  git_bfg_lfs "$1" | tee -a "$STATUS"
+  git commit -m 'SVN2GitHub Master initialization.' &>> "$CNVLOG"
+  git_add_remote "$1"
+
+  git push -u origin master >> "$PHLOG" 2&>1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: convert init $1" >> "$RTYLOG"
+    retry git push -u origin master
+  fi
+
+  git config remote.origin.push 'refs/remotes/*:refs/heads/*'
+
+  if ! $DRYRUN ; then
+    add_submodules "$1" | tee -a "$STATUS"
+  fi
+
+  if [ "$1" == "$REPO_NAME" ]; then
+    git_et_al_primary "$SVN_DIR" | tee -a "$STATUS"
+  else
+    git_et_al "$1" | tee -a "$STATUS"
+  fi
+
+  git commit -m 'SVN2GitHub added other files from svn repo not under version control.'
+  git_bfg_lfs "$1"
+  git commit -m 'SVN2GitHub Master branch conversion complete.' &>> "$CNVLOG"
+  git push -u origin master >> "$PHLOG" 2&>1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    #TODO cleanup? git_bfg_lfs "$1"
+    echo "RETRYING: convert master $1" >> "$RTYLOG"
+    retry git push -u origin master
+  fi
+
+  if $TAGS ; then
+    git_tags | tee -a "$STATUS"
+  fi
+
+  if $BRANCHES ; then
+    git_branches | tee -a "$STATUS"
+  fi
+
+  if $PRESERVE_TRUNK; then
+    #git_nest_submodules_in_trunk "$1"
+    git_nest_trunk_as_submodule "$1" | tee -a "$STATUS"
+  fi
+  echo "SUCCESS: Conversion of repo \"$1\" complete." | tee -a "$STATUS"
+}
+
+#TODO - Unused
+#git_nest_submodules_in_trunk ()
+#{
+#  git checkout -b trunk &>> "$CNVLOG"
+#  git checkout trunk &>> "$CNVLOG"
+#  git pull --no-edit origin trunk &>> "$CNVLOG"
+#  add_submodules "$1"
+#  git commit -m 'SVN2GitHub conversion: Trunk Preservation Enabled.' &>> "$CNVLOG"
+#  git push -u origin trunk &>> "$PHLOG"
+#  if [ "$?" -ne 0 ]; then
+#    echo "RETRYING: nest submodules in trunk $1" >> "$RTYLOG"
+#    retry git push -u origin trunk
+#  fi
+#}
+
+git_nest_trunk_as_submodule ()
+{
+  if [ ! "$(git branch -a|grep \*[[:space:]]master$)" ]; then
+    git checkout master &>> "$CNVLOG"
+  fi
+
+  git pull --no-edit origin master &>> "$CNVLOG"
+
+  if $NOORG ; then
+    trunk_url="https://$NTID:$TOKEN@$GITHUB/$NTID/$(basename "$(pwd)")"
+  else
+    trunk_url="https://$NTID:$TOKEN@$GITHUB/$ORG/$(basename "$(pwd)")"
+  fi
+
+  git submodule add -b trunk -f "$trunk_url" ./trunk >> "$CNVLOG" 2>&1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: git_nest_trunk_as_submodule" >> "$RTYLOG"
+    retry git submodule add -b trunk -f "$trunk_url" ./trunk
+  fi
+  :
+  #Remove NTID & Token from git URL
+  sed -i s/https:\\/\\/$NTID:$TOKEN@$GITHUB\\//git@$GITHUB:/g .gitmodules
+  git add .gitmodules &>> "$CNVLOG"
+  git commit -m 'SVN2GitHub conversion: added trunk branch as submodule with path ./trunk' &>> "$CNVLOG"
+  git push -u origin master >> "$PHLOG" 2>&1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: git_nest_trunk_as_submodule" >> "$RTYLOG"
+    retry git push -u origin master
+  fi
+}
+
+git_clone ()
+{
+  echo "NOTICE: Cloning $1 from svn to git now..." | tee -a "$STATUS"
+  if [ "$1" == "$REPO_NAME" ]; then
+    local url=$SVN_REPO
+  else
+    local url=${ModuleUrls["$1"]}
+  fi
+  if ! $UNDO ; then
+    if [ ! -d "$TMP_DIR/$1.git" ] || [ "$FORCE" == true ]; then
+        git svn clone "$url" "$LAYOUT" --authors-file="$AUTHORS_FILE" --authors-prog="$AUTHORPROG" --quiet "$TMP_DIR/$1.git" >> "$CNLOG" 2>&1
+        result=$?
+        if [ "$result" -ne 0 ]; then
+          echo "RETRYING: clone $1" >> "$RTYLOG"
+          retry git svn clone "$url" "$LAYOUT" --authors-file="$AUTHORS_FILE" --authors-prog="$AUTHORPROG" --quiet "$TMP_DIR"/"$1".git
+        fi
+    else
+      echo "FAILURE: \"$TMP_DIR/$1.git\" failed to clone completely in a previous run, try again with --force" >> "$STATUS"
+      fail
+    fi
+    echo "SUCCESS: Clone of $1 complete, converting $1 now..." | tee -a "$STATUS"
+  fi
+}
+
+svn_tree ()
+{
+  cd "$TMP_DIR/$REPO_NAME.git"
+  if [ ! "$(git branch -a|grep -q \*[[:space:]]master$)" ]; then
+    git checkout master &>> "$CNVLOG"
+  fi
+  git pull --no-edit origin master &>> "$CNVLOG"
+  tree "$SVN_DIR" &> .svn_tree
+  git add .svn_tree &>> "$CNVLOG"
+  git commit -m 'Original SVN Repository Tree' &>> "$CNVLOG"
+  git push -u origin master >> "$PHLOG" 2>&1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: svn_tree" >> "$RTYLOG"
+    retry git push -u origin master
+  fi
+}
+
+archive_job ()
+{
+  cp "$RPO_DIR/"* "$LOG_DIR/"
+  cp "$AUTHORS_FILE" "$LOG_DIR/"
+  cp "$TMP_DIR/$REPO_NAME.git/.svn_tree" "$LOG_DIR/svn_tree"
+  cd "$WORK_DIR"
+  timestamp=$(date +%s)
+  tar czf "$REPO_NAME-$timestamp.tar.gz" "$LOG_DIR"
+  mv "$REPO_NAME-$timestamp.tar.gz" "$JOB_DIR"
+}
+
+git_bfg_lfs ()
+{
+  sleep $SLEEP_TIME #not sure why lfs doesn't have a value sometimes
+  lfs=$(find "$TMP_DIR/$1.git" -type f -size +"$LFS"M|grep -Ev '/\.svn|/\.subversion|/\.git')
+  echo "DEBUG: LFS = $lfs" >> "$LFSLOG"
+  if [ -n "$lfs" ]; then
+    #TODO deprecate because it breaks lfs on current branch?
+    # if [ ! -d "$LFS_DIR" ]; then
+    #   mkdir "$LFS_DIR"
+    # fi
+    # echo "" > "$LFS_DIR/$1"
+    # for big_file in $lfs; do
+    #   if [ "$(basename $big_file|grep .)" ]; then
+    #    extension=$(echo $big_file|rev|awk -F "." '{print $1}'|rev)
+    #    echo pattern="'*.$extension'" >> "$LFS_DIR/$1"
+    #   else
+    #    echo patten="'$(basename $big_file)'" >> "$LFS_DIR/$1"
+    #   fi
+    # done
+
+
+    # for lfs_pattern in $(grep pattern= "$LFS_DIR/$1"|awk -F "pattern=" '{print $2}'|sort -u); do
+    #   java -jar "$BFGPROG" --convert-to-git-lfs $lfs_pattern --no-blob-protection "$TMP_DIR/$1.git" &>> "$BFGLOG"
+    # done
+
+    git lfs install &>> "$LFSLOG"
+
+    for file in $lfs; do
+      track_file=$(echo "$file"|awk -F "$(pwd)/" '{print $2}')
+      git lfs track "$track_file" &>> "$LFSLOG"
+      git add "$track_file" &>> "$LFSLOG"
+    done
+
+    git add .gitattributes &>> "$LFSLOG"
+    git reflog expire --expire=now --all && git gc --prune=now --aggressive &>> "$BFGLOG"
+  fi
+
+  java -jar "$BFGPROG" --strip-blobs-bigger-than "$BLOB_LIMIT"M --no-blob-protection &>> "$BFGLOG"
+  git reflog expire --expire=now --all && git gc --prune=now --aggressive &>> "$BFGLOG"
+  sleep $SLEEP_TIME
+}
+
+git_tags ()
+{
+  for ref in $(git for-each-ref --format='%(refname)' refs/remotes/tags|cut -d / -f 4)
+  do
+    tag=$(echo "$ref"|sed s/%20/'_'/g)
+    git tag "$tag" "refs/remotes/tags/$ref" &>> "$CNVLOG"
+  done
+
+  git push --tags >> "$PHLOG" 2>&1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: git_tags $(pwd)" >> "$RTYLOG"
+    retry git push --tags
+  fi
+}
+
+git_branches ()
+{
+  for ref in $(find .git/refs -type f |grep -Ev 'heads/|origin/|/stash'); do
+    mv "$ref" .git/refs/remotes/origin/
+  done
+  git push -u origin >> "$PHLOG" 2>&1
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    echo "RETRYING: push branches $(pwd)" >> "$RTYLOG"
+    retry git push -u origin
+  fi
+
+  if ! $TAG_BRANCH; then
+    for branch in $(git branch -r|grep origin|grep tags/); do
+      git push origin --delete "origin/$branch" >> "$CNLOG" 2>&1
+      result=$?
+      if [ "$result" -ne 0 ]; then
+        echo "RETRYING: delete tag branches $(pwd)" >> "$RTYLOG"
+        retry git push origin --delete "origin/$branch"
+      fi
+    done
+  fi
+}
+
+undo ()
+{
+  if [ -n "$(find "$RPO_DIR" -type f -name "*.json")" ]; then
+    UNDO=$(ls "$RPO_DIR"/*.json|rev|awk -F "/" '{print $1}'|rev|awk -F ".json" '{print $1}')
+    for repo in $UNDO;
+    do
+      gh_delete "$repo"
+      if [ -f "$RPO_DIR/$repo.json" ]; then
+        rm -f "$RPO_DIR/$repo.json"
+      fi
+      if [ -d "$TMP_DIR/$repo.git" ]; then
+        rm -rf "$TMP_DIR/$repo.git"
+      fi
+    done
+  elif [ -n "$(find "$JOB_DIR" -type f -name "$REPO_NAME*gz")" ]; then
+    zips=$(find "$JOB_DIR" -type f -name "$REPO_NAME*gz")
+    for tar in $zips; do
+      tar xf "$tar"
+      UNDO=$(find "$JOB_DIR" -type f -name "$REPO_NAME_lower*.json"|rev|awk -F "/" '{print $1}'|rev|awk -F ".json" '{print $1}')
+      for repo in $UNDO;
+      do
+        gh_delete "$repo"
+        find "$JOB_DIR" -type f -name "$repo.json" -delete
+      done
+    done
+    gh_delete "$REPO_NAME"
+  else
+    echo "The --undo flag was used, but there appears to be nothing to undo in \"$RPO_DIR\"" | tee -a "$STATUS"
+  fi
+}
+
+single_thread ()
+{
+  for sub in $MODULES; do
+    submodule=$(echo "$sub"|awk -F "$SVN_DIR/" '{print $2}'|rev|awk -F "/" '{print $1}'|rev)
+    submodules=(${submodules[@]} "$submodule")
+  done
+
+  for module in $submodules
+  do
+    if ! gh_conflict "$module" ; then
+      if $NOORG; then
+        create_repo "$module" "Submodule of https://$GITHUB/$NTID/$REPO_NAME"
+      else
+        create_repo "$module" "Submodule of https://$GITHUB/$ORG/$REPO_NAME"
+      fi
+    else
+      if $NOORG ; then
+        echo "WARNING: $module already exists in $GITHUB under $NTID" | tee -a "$STATUS"
+      else
+        echo "WARNING: $module already exists in $GITHUB under $ORG" | tee -a "$STATUS"
+      fi
+      num=0
+      until ! gh_conflict "$module-$num"
+      do
+        num=$(expr $num + 1)
+      done
+      if $NOORG; then
+        create_repo "$module-$num" "Submodule of https://$GITHUB/$NTID/$REPO_NAME"
+      else
+        create_repo "$module-$num" "Submodule of https://$GITHUB/$ORG/$REPO_NAME"
+      fi
+      if $NOORG ; then
+        echo "WARNING: $module was RENAMED to $module-$num in github because $module already exists under $NTID" | tee -a "$STATUS"
+      else
+        echo "WARNING: $module was RENAMED to $module-$num in github because $module already exists under $ORG" | tee -a "$STATUS"
+      fi
+    fi
+    git_clone "$module"
+    convert "$module"
+  done
+}
+
+install ()
+{
+  yum makecache fast &>> "$STATUS"
+
+  if [ ! "$(yum list installed|grep git-svn)" ]; then
+    echo "Installing git-svn..." | tee -a "$STATUS"
+    yum -qy install git-svn
+  fi
+  if [ ! "$(yum list installed|grep git-lfs)" ]; then
+      echo "Installing git-lfs..." | tee -a "$STATUS"
+      #Source from https://packagecloud.io/github/git-lfs
+      if [ "$(uname -a|awk '{print $3}'|grep el7)" ]; then
+        yum -qy install "$LFS_DOWNLOAD"
+      fi
+      if [ "$(uname -a|awk '{print $3}'|grep el6)" ]; then
+        yum -qy install "$LFS_DOWNLOAD"
+      fi
+  fi
+  if [ ! "$(yum list installed|grep openjdk)" ]; then
+    echo "Installing java-1.7.0-openjdk..." | tee -a "$STATUS"
+    yum -qy install java-1.7.0-openjdk
+  fi
+  if [ ! "$(yum list installed|grep expect)" ]; then
+    echo "Installing expect..." | tee -a "$STATUS"
+    yum -qy install expect
+  fi
+  if [ ! "$(yum list installed|grep tree)" ]; then
+    echo "Installing tree..." | tee -a "$STATUS"
+    yum -qy install tree
+  fi
+  if [ ! -f "$BFGPROG" ]; then
+    curl -o "$BFGPROG" -k -s "$BFG_DOWNLOAD"
+  fi
+  if [ ! -f "$AUTHORPROG" ]; then
+    author_prog
+  fi
+}
+
+save_svn_credentials ()
+{
+  if [ ! "$(grep "$EVC" /root/.subversion/auth/svn.ssl.server/*)" ]; then
+  expect -c '
+spawn svn info --username=$::env(SVN_USER) $::env(SVN_REPO)
+expect "Error validating server certificate"
+send "p\r"
+expect eof ' ; &> "$CNLOG"
+  fi
+ #TODO add rm -rf ~/.svn to --force or fix with individual users, and a check job running for user functions
+ #if [ ! "$(grep $SVN_USER /root/.subversion/auth/svn.simple/*)" ]; then
+  expect -c '
+spawn svn info --username=$::env(SVN_USER) $::env(SVN_REPO)
+expect "Password for"
+send "$::env(SVN_PASS)\r"
+expect "Store password"
+send "yes\r"
+expect eof ' ; &> "$CNLOG"
+ #fi
+}
+
+checkout ()
+{
+  cd "$WORK_DIR"
+  if [ -n "$SVN_USER" ] && [ -n "$SVN_PASS" ]; then
+    svn checkout --trust-server-cert --non-interactive --no-auth-cache --username="$SVN_USER" --password="$SVN_PASS" "$SVN_REPO" > "$COLOG" 2>&1
+    result=$?
+  else
+    svn checkout --trust-server-cert --non-interactive --no-auth-cache "$SVN_REPO" > "$COLOG" 2>&1
+    result=$?
+  fi
+
+  if [ "$result" -eq 0 ]; then
+    echo "SUCCESS: \"$REPO_NAME\" was checked out." | tee -a "$STATUS" "$COLOG"
+    echo "Checking for submodules..." | tee -a "$STATUS"
+    export MODULES=$(find "$SVN_DIR" -mindepth 1 -type d -regextype posix-extended -regex "^.*/$TRUNK"|grep -Ev "/$TAG/"|grep -Ev "/$BRANCH/"|grep -v "$SVN_DIR"$|rev|cut -d / -f 2-|rev|sort -u)
+  else
+    echo "FAILURE: $REPO_NAME failed to checkout, see \"$COLOG\" for details." | tee -a "$STATUS"
+    fail
+  fi
+}
+
+authors ()
+{
+  cd "$SVN_DIR"
+  for author in $(svn log -q |grep ^r|awk '{print $3}'|sort -u); do
+    if [ -n "$(getent passwd "$author")" ]; then
+      name=$(getent passwd "$author"|awk -F ":" '{print $5}')
+      email=$(echo "$name"|sed s/' '/'_'/g)
+    else
+    name="$author"
+    email="$author"
+      #name="Unknown_$author"
+      #email="Missing_$author"
+    fi
+    echo "$author = $name <$email@$DEFAULT_DOMAIN>" >> "$AUTHORS_FILE"
+  done
+}
+
+ignore ()
+{
+  svn_sed=$(echo "$SVN_DIR"|sed s/'\/'/'\\\/'/g)
+  svn pg -R svn:ignore "$SVN_DIR" |sort -u|sed s/^"$svn_sed\/"/''/g|sed s/^"$REPO_NAME\/"/''/g|sed s/^"$REPO_NAME\/"/''/g > "$IGNORE_FILE" 2>&1
+  result=$?
+
+  if [ "$result" ] && [ -f "$IGNORE_FILE" ]; then
+    echo "SUCCESS: gitignore template created from svn properties." | tee -a "$STATUS"
+  else
+    echo "FAILURE: something went wrong while creating the gitignore template"
+    fail
+  fi
+}
+
+create_primary ()
+{
+  echo "Converting primary repository \"$REPO_NAME\" to git..." | tee -a "$STATUS"
+
+  create_repo "$REPO_NAME" "Subversion conversion of $SVN_REPO"
+
+  if has_trunk "$SVN_DIR" ; then
+    echo "Repository \"$REPO_NAME\" was found to have a trunk at root level, this could take a while..." | tee -a "$PRNLOG"
+
+    if ! $UNDO ; then
+      git_clone "$REPO_NAME"
+      convert "$REPO_NAME"
+    fi
+
+  else
+    echo "Creating skeleton repository for \"$REPO_NAME\"" | tee -a "$PRNLOG"
+
+    mkdir "$TMP_DIR/$REPO_NAME.git"
+    cd "$TMP_DIR/$REPO_NAME.git"
+
+    git init &>> "$PRNLOG"
+    git checkout -b master &>> "$PRNLOG"
+
+    if ! $DRYRUN ; then
+        add_submodules "$REPO_NAME"
+    fi
+    git_et_al_primary "$SVN_DIR"
+    git_bfg_lfs "$REPO_NAME"
+
+    if $NOORG ; then
+      git remote add origin "https://$NTID:$TOKEN@$GITHUB/$NTID/$REPO_NAME.git" &>> "$PRNLOG"
+    else
+      git remote add origin "https://$NTID:$TOKEN@$GITHUB/$ORG/$REPO_NAME.git" &>> "$PRNLOG"
+    fi
+
+    git add * &>> "$PRNLOG"
+    cat "$IGNORE_FILE" > .gitignore
+    git add .gitignore &>> "$PRNLOG"
+    git commit -m 'SVN2GitHub conversion Completion.' &>> "$PRNLOG"
+    git push -u origin master &>> "$PRNLOG"
+  fi
+
+  svn_tree
+}
+
+git_et_al_primary ()
+{
+  local name=$(basename "$1")
+  local search_dir="$SVN_DIR"
+  local except='$'
+
+  nested_projects=$(find "$search_dir" -mindepth 1 -maxdepth 1 -type d|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion")
+  top_files=$(find "$search_dir" -mindepth 1 -maxdepth 1 -type f)
+
+  if [ -n "$nested_projects" ]; then
+    et_al_dirs=$(find "$search_dir" -type d|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion|/\.git|$1$")
+    filter="($(echo "${ModuleOrigins[@]}"|sed s/', '/'|'/g|sed s/' '/'[[:space:]]'/g|rev|cut -c 2-|rev))"
+    other_dirs=$(echo "$et_al_dirs"|grep -Ev "$filter")
+  fi
+
+  if [ -n "$other_dirs" ] || [ -n "$top_files" ]; then
+    cd "$TMP_DIR/$name.git"
+
+    if [ -n "$other_dirs" ]; then
+      echo "Adding directories and files from \"$SVN_REPO\" to \"$REPO_NAME\" that were not part of any trunk, branch, tag or meta-data..." | tee -a "$STATUS"
+      for dir in $other_dirs; do
+        et_al_files=$(find "$dir" -mindepth 1 -maxdepth 1 -type f|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion|/\.git|$1$")
+        other_files=$(echo "$et_al_files"|grep -Ev "$filter")
+        dir_path=$(echo "$dir"|awk -F "$SVN_DIR/" '{print $2}')
+        dir_perm=$(stat -c "%a" "$dir")
+
+        if [ ! -d "$TMP_DIR/$name.git/$dir_path" ]; then
+          mkdir -p "$TMP_DIR/$name.git/$dir_path"
+        fi
+
+        chmod "$dir_perm" "$TMP_DIR/$name.git/$dir_path"
+
+        for file in $other_files; do
+          if [ -n "$dir_path" ]; then
+            cp -pv "$file" "$TMP_DIR/$name.git/$dir_path/" &>> "$CPLOG"
+          else
+            cp -pv "$file" "$TMP_DIR/$name.git/" &>> "$CPLOG"
+          fi
+        done
+        git add "$dir_path" &>> "$CNVLOG"
+      done
+    fi
+
+    if [ -n "$top_files" ]; then
+      echo "Adding top level files from \"$SVN_REPO\" to \"$REPO_NAME\" that were not part of a trunk, branch, tag or meta-data..." | tee -a "$STATUS"
+      for file in $top_files; do
+        cp -pv "$file" "$TMP_DIR/$name.git/" &>> "$CPLOG"
+        git add "$TMP_DIR/$name.git/$(basename "$file")"
+      done
+    fi
+    git add * &>> "$CNVLOG"
+  fi
+}
+
+git_et_al ()
+{
+  local search_dir=${ModulePaths["$1"]}
+  local original_name=${ModuleNames["$1"]}
+  local split="$SVN_DIR/${ModuleRelatives["$1"]}/"
+
+  nested_projects=$(find "$search_dir" -mindepth 1 -maxdepth 1 -type d|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion|/\.git")
+  top_files=$(find "$search_dir" -mindepth 1 -maxdepth 1 -type f)
+  if [ -n "$nested_projects" ]; then
+    other_dirs=$(find "$search_dir" -type d|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion|$original_name$")
+  fi
+  if [ -n "$other_dirs" ] || [ -n "$top_files" ]; then
+    cd "$TMP_DIR/$1.git"
+    if [ -n "$other_dirs" ]; then
+      echo "Adding directories and files from to \"$1\" that were not part of any trunk, branch, tag or meta-data..." | tee -a "$STATUS"
+      for dir in $other_dirs; do
+        dir_path=$(echo "$dir"|awk -F "$split" '{print $2}')
+        other_files=$(find "$split/$dir_path" -mindepth 1 -maxdepth 1 -type f|grep -Ev "/$TRUNK/|/$TRUNK$|/$TAG/|/$TAG$|/$BRANCH/|/$BRANCH$|/\.svn|/\.subversion|/\.git")
+        dir_perm=$(stat -c "%a" "$dir")
+
+        if [ ! -d "$TMP_DIR/$1.git/$dir_path" ]; then
+          mkdir -p "$TMP_DIR/$1.git/$dir_path" &>> "$CPLOG"
+        fi
+        chmod "$dir_perm" "$TMP_DIR/$1.git/$dir_path" &>> "$CPLOG"
+
+        for file in $other_files; do
+          cp -pv "$file" "$TMP_DIR/$1.git/$dir_path/" &>> "$CPLOG"
+        done
+        git add "$dir_path" &>> "$CNVLOG"
+      done
+    fi
+
+    if [ -n "$top_files" ]; then
+      echo "Adding top level files from to \"$1\" that were not part of a trunk, branch, tag or meta-data..." | tee -a "$STATUS"
+      for file in $top_files; do
+        cp -pv "$file" "$TMP_DIR/$1.git/" &>> "$CPLOG"
+        git add "$TMP_DIR/$1.git/$(basename "$file")"
+      done
+    fi
+    git add * &>> "$CNVLOG"
+  fi
+}
+
+clean_logs ()
+{
+  for log in "$COLOG" "$CNLOG" "$STATUS" "$SVNLOG" "$CNVLOG" "$CRTLOG" "$UNDLOG" "$PHLOG" "$IMPLOG" "$FAMILY" "$GHLOG" "$LFSLOG" "$PRNLOG" "$BFGLOG" "$RPTLOG" "$CPLOG" "$DBGLOG" "$RTYLOG"; do
+    if [ -f "$log" ]; then
+      echo '' > "$log"
+    fi
+  done
+
+  rm -rf "$SUB_DIR"
+  rm -rf "$TMP_DIR"/*bfg-report
+}
+
+report ()
+{
+  echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  echo "| -- REPORT --                                                                                                  |" >> "$RPTLOG"
+  echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  if [ -n "$MOD_COUNT" ]; then
+    echo "| TOTAL of $MOD_COUNT svn repositories found" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$STATUS" ]; then
+    if [ -n "$(grep EMPTY "$STATUS"|sort -u)" ]; then
+      empty_count=$(grep EMPTY "$STATUS"|sort -u|wc -l)
+      echo "| $empty_count modules were skipped because they were found to be empty" >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    fi
+
+    if [ "$(grep RENAMED "$STATUS")" ]; then
+      conflict_count=$(grep RENAMED "$STATUS"|sort -u |awk '{print $2}'|sort -u|wc -l)
+      echo "| $conflict_count submodules were renamed in github due to naming conflict" >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    fi
+  fi
+
+  if [ -f "$CRTLOG" ]; then
+    creation_count=$(grep -F 'SUCCESS' "$CRTLOG"|sort -u|wc -l)
+    echo "| $creation_count repositories were created in $GITHUB" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$UNDLOG" ]; then
+    delete_count=$(grep -F 'SUCCESS' "$UNDLOG"|sort -u|wc -l)
+    echo "| $delete_count repositories were removed from $GITHUB" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$AUTHORS_FILE" ]; then
+    author_count=$(cat "$AUTHORS_FILE"|sort -u|wc -l)
+    echo "| $author_count authors were found in $SVN_REPO" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$IGNORE_FILE" ]; then
+    ignore_count=$(cat "$IGNORE_FILE"|sort -u|wc -l)
+    echo "| $ignore_count ignore attriubutes were found in $SVN_REPO" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$LFSLOG" ]; then
+    lfs_count=$(cat "$LFSLOG"|sort -u|wc -l)
+    echo "| $lfs_count files larger than $LFS were found" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+  fi
+
+  if [ -f "$RTYLOG" ]; then
+    if [ -n "$(grep 'RETRY #1' "$RTYLOG"|sort -u)" ]; then
+      retry_count=$(grep 'RETRY #1' "$RTYLOG"|sort -u|wc -l)
+      echo "| $retry_count events occured that failed at first and were retried." >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    fi
+
+    if [ "$(grep FAILURE: "$RTYLOG")" ]; then
+      refail_count=$(grep FAILURE: "$RTYLOG"|sort -u|wc -l)
+      echo "| $refail_count events were re-tried and failed completely in this order." >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+      echo "| -- RETRY FAILURES --                                                                                                |" >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+      for refail in $(grep FAILURE: "$RTYLOG"); do
+        echo "| $refail " >> "$RPTLOG"
+        echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+      done
+    fi
+  fi
+  if [ "$(grep WARNING: "$STATUS")" ]; then
+    warning_count=$(grep WARNING: "$STATUS"|wc -l)
+    echo "| $warning_count warnings occured" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    echo "| -- WARNINGS --                                                                                                |" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    for warning in $(grep WARNING: "$STATUS"); do
+      echo "| $warning " >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    done
+  fi
+  if [ "$(grep FAILURE: "$STATUS")" ]; then
+    failure_count=$(grep FAILURE: "$STATUS"|wc -l)
+    echo "| $failure_count failures occured" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    echo "| -- FAILURES --                                                                                                |" >> "$RPTLOG"
+    echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    for failure in $(grep FAILURE: "$STATUS"); do
+      echo "| $failure " >> "$RPTLOG"
+      echo "|---------------------------------------------------------------------------------------------------------------|" >> "$RPTLOG"
+    done
+  fi
+
+  if [ -f "$FAMILY" ]; then
+    cat "$FAMILY"
+  fi
+
+  if [ -f "$RPTLOG" ]; then
+    cat "$RPTLOG"
+  fi
+
+}
+
+main
