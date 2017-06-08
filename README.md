@@ -57,7 +57,7 @@ All options from the command line must be given in the form of `--option=value` 
 * __tags__              `[default: null ]` - a csv list of alternative tag dir names or specify just one
 * __branches__          `[default: null ]` - a csv list of alternative branch dir names or specify just one
 * __svn-prefix__        `[default: null ]` - specify a prefix given to an otherwise standard-layout of svn directories
-* __authors__           `[default: null ]` - path of authors file rather than generate one, may not provide correct email address for users who do not conform to first_last@cable.comcast.com
+* __authors__           `[default: null ]` - path of authors file rather than generate one, may not provide correct email address for users who do not conform to first_last@yourdomain.com
 * __ignore__            `[default: null  ]` - path of import file for gitignore file rather than convert it from the existing svn ignore attributes
 * __lfs-limit__         `[default: 150 ]` - specify the large-file-size limit, 2 ~ 2 Megabytes, 100K ~ 100 Kilobytes, maximum in github is 50, [2-5] is optimal
 * __blob-limit__        `[default: 150 ]` - specify the max size of blobs allowed, 50 ~ 50 Megabytes, maximum in github is 50, < 50 is optimal
