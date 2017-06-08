@@ -1,6 +1,6 @@
 # svn-to-github
 SVN to Github Tool for Public and Enterprise
-[![GitHub release](https://img.shields.io/github/release/qubyte/rubidium-v1.16.0-blue.svg)](https://github.com/comcast/svn-to-github/releases/tag/v1.16.0) [![GitHub issues](https://img.shields.io/github/issues/badges/shields.svg)](https://github.com/Comcast/svn-to-github/issues) [![GitHub contributors](https://img.shields.io/github/contributors/cdnjs/cdnjs.svg)](https://github.com/Comcast/svn-to-github/graphs/contributors) [![license](https://img.shields.io/github/license/mashape/apistatus.svg)](https://github.com/Comcast/svn-to-github/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/github/release/qubyte/rubidium-v1.16.0-blue.svg)](https://github.com/Comcast/svn-to-github/releases/download/1.16.0/svn-to-github-1.16.0-0.noarch.rpm) [![GitHub issues](https://img.shields.io/github/issues/badges/shields.svg)](https://github.com/Comcast/svn-to-github/issues) [![GitHub contributors](https://img.shields.io/github/contributors/cdnjs/cdnjs.svg)](https://github.com/Comcast/svn-to-github/graphs/contributors) [![license](https://img.shields.io/github/license/mashape/apistatus.svg)](https://github.com/Comcast/svn-to-github/blob/master/LICENSE)
 
 ## Overview
 
