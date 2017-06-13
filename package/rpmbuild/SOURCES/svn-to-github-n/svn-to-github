@@ -21,7 +21,7 @@ while test $# -gt 0; do
               echo "--svn-url=https://svn.yourdomain.net/my_repo                [required]: to specify the source svn repo"
               echo "--svn-user=username                                         [optional]: to specify the source svn repo username"
               echo "--svn-pass=password                                         [optional]: to specify the source svn repo password, if special characters are used quote password in single-quotes"
-              echo "--org=aps                                                   [required option A]: the github organization to create the repo(s) in"
+              echo "--org=my_org                                                   [required option A]: the github organization to create the repo(s) in"
               echo "--no-org                                                    [required option B]: don't create repos under an org, but rather under a user instead, caveat is repo(s) cannot already exist in user's primary Organization"
               echo "--no-branches                                               [optional]: do not convert branches, ignore all branches"
               echo "--no-tags                                                   [optional]: do not convert tags, ignore all tags"
@@ -1077,8 +1077,6 @@ create_submodules ()
     if [ ! -d "$SUB_DIR" ]; then
       mkdir "$SUB_DIR"
     fi
-    #for module in $(echo "$MODULES"|grep Entitlements|head -2) ; do #submodule test
-    #for module in $(echo "$MODULES"|grep ETLConversion|head -3) ; do #submodule test
     #TODO DEBUG
     for module in $MODULES ; do #full run
       local relative_path=$(echo "$module"|awk -F "$SVN_DIR/" '{print $2}')
