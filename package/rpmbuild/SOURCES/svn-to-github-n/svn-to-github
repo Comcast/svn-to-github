@@ -2,7 +2,7 @@
 #
 #    Name: SVN2GitHub
 #  Author: Dustin Morgan <dustin_morgan@comcast.com>
-#    Date: May 12, 2017
+#    Date: Jun 13, 2017
 # Purpose: Ease the conversion of SVN to Git and use git submodules for
 #          non-standard svn layouts with nested projects
 #
